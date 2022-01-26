@@ -38,9 +38,13 @@ defmodule Pooly.Server do
   end
 
   defp worker_supervisor_spec() do
+    # Restart is temporary because we want to have some custom
+    # recovery.
     %{
       id: Pooly.WorkerSupervisor,
       start: {Pooly.WorkerSupervisor, :start_link, []},
+      type: :supervisor,
+      # restart: :permanent
       restart: :temporary
     }
   end
@@ -82,9 +86,20 @@ defmodule Pooly.Server do
   def handle_info(:start_worker_supervisor, state = %{sup: sup, mfa: mfa, size: size}) do
     # sup -> Supervisor that supervises both GenServer(Pooly.Server) and DynamicSupervisor(Pooly.WorkerSupervisor)
     # DynamicSupervisor needs to run under `sup`.
+
     {:ok, worker_sup} = Supervisor.start_child(sup, worker_supervisor_spec())
     workers = prepopulate(size, worker_sup, mfa)
     {:noreply, %{state | worker_sup: worker_sup, workers: workers}}
+
+    # Code for making worker supervisor restart permanent.
+    # worker_sup = case Supervisor.start_child(sup, worker_supervisor_spec()) do
+    #   {:ok, pid} -> pid
+    #   {:error, {:already_started, pid}} -> pid
+    # end
+
+    # workers = prepopulate(size, worker_sup, mfa)
+    # {:noreply, %{state | worker_sup: worker_sup, workers: workers}}
+
   end
 
   # Handle consumer going down. Return worker back to the pool.
