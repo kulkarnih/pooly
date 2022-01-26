@@ -11,6 +11,11 @@ defmodule Pooly.Server do
   end
 
   def init([sup, pool_config]) when is_pid(sup) do
+    # We need to perform operations when Pooly.Server or Worker crashes.
+    # In case the worker crashes only cleanup is required.
+    # In case the server crashes workers need to be killed as a dangling worker will be orphaned without reference.
+    # Link the server to worker processes, and trap exits only in the server.
+    Process.flag(:trap_exit, true)
     monitors = :ets.new(:monitors, [:private])
     init(pool_config, %State{sup: sup, monitors: monitors})
   end
@@ -30,14 +35,6 @@ defmodule Pooly.Server do
   def init([], state) do
     send(self(), :start_worker_supervisor)
     {:ok, state}
-  end
-
-  def handle_info(:start_worker_supervisor, state = %{sup: sup, mfa: mfa, size: size}) do
-    # sup -> Supervisor that supervises both GenServer(Pooly.Server) and DynamicSupervisor(Pooly.WorkerSupervisor)
-    # DynamicSupervisor needs to run under `sup`.
-    {:ok, worker_sup} = Supervisor.start_child(sup, worker_supervisor_spec())
-    workers = prepopulate(size, worker_sup, mfa)
-    {:noreply, %{state | worker_sup: worker_sup, workers: workers}}
   end
 
   defp worker_supervisor_spec() do
@@ -81,9 +78,42 @@ defmodule Pooly.Server do
     GenServer.cast(__MODULE__, {:checkin, worker_pid})
   end
 
+  # Invoked by init.
+  def handle_info(:start_worker_supervisor, state = %{sup: sup, mfa: mfa, size: size}) do
+    # sup -> Supervisor that supervises both GenServer(Pooly.Server) and DynamicSupervisor(Pooly.WorkerSupervisor)
+    # DynamicSupervisor needs to run under `sup`.
+    {:ok, worker_sup} = Supervisor.start_child(sup, worker_supervisor_spec())
+    workers = prepopulate(size, worker_sup, mfa)
+    {:noreply, %{state | worker_sup: worker_sup, workers: workers}}
+  end
+
+  # Handle consumer going down. Return worker back to the pool.
+  def handle_info({:DOWN, ref, _, _, _}, state = %{monitors: monitors, workers: workers}) do
+    case :ets.match(monitors, {:"$1", ref}) do
+      [[pid]] ->
+        true = :ets.delete(monitors, pid)
+        new_state = %{state | workers: [pid | workers]}
+        {:noreply, new_state}
+      [[]] -> {:noreply, state}
+    end
+  end
+
+  # Handle worker going down. Start another instance of worker.
+  def handle_info({:EXIT, pid, _reason}, state = %{mfa: mfa, monitors: monitors, workers: workers, worker_sup: worker_sup}) do
+    case :ets.lookup(monitors, pid) do
+      [{pid, ref}] ->
+        true = Process.demonitor(ref)
+        true = :ets.delete(monitors, pid)
+        new_state = %{state | workers: [new_worker(worker_sup, mfa) | workers]}
+        {:noreply, new_state}
+    end
+  end
+
   def handle_call(:checkout, {from_pid, _ref}, %{workers: workers, monitors: monitors} = state) do
     case workers do
       [worker | rest] ->
+        # Monitor the consumer process.
+        # A crashed consumer should return the worker to pool.
         ref = Process.monitor(from_pid)
         true = :ets.insert(monitors, {worker, ref})
         {:reply, worker, %{state | workers: rest}}
