@@ -33,7 +33,7 @@ defmodule Pooly.Server do
   defp supervisor_spec(pool_config) do
     %{
       id: :"#{pool_config[:name]}Supervisor",
-      start: {Pooly.PoolSupervisor, :start_link, []},
+      start: {Pooly.PoolSupervisor, :start_link, [pool_config]},
       type: :supervisor
     }
   end

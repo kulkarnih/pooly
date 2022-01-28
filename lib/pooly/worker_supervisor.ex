@@ -2,8 +2,8 @@ defmodule Pooly.WorkerSupervisor do
 
   use DynamicSupervisor
 
-  def start_link() do
-    DynamicSupervisor.start_link(__MODULE__, :ok)
+  def start_link(name) do
+    DynamicSupervisor.start_link(__MODULE__, :ok, name: name)
   end
 
   def init(_) do

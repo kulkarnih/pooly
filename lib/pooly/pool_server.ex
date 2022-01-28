@@ -20,6 +20,10 @@ defmodule Pooly.PoolServer do
     init(pool_config, %State{pool_sup: pool_sup, monitors: monitors})
   end
 
+  def init([{:name, name} | rest], state) do
+    init(rest, %{state | name: name})
+  end
+
   def init([{:mfa, mfa} | rest], state) do
     init(rest, %{state | mfa: mfa})
   end
@@ -58,18 +62,18 @@ defmodule Pooly.PoolServer do
     # sup -> Supervisor that supervises both GenServer(Pooly.Server) and DynamicSupervisor(Pooly.WorkerSupervisor)
     # DynamicSupervisor needs to run under `sup`.
 
-    {:ok, worker_sup} = Supervisor.start_child(pool_sup, worker_supervisor_spec(name))
-    workers = prepopulate(size, worker_sup, mfa)
-    {:noreply, %{state | worker_sup: worker_sup, workers: workers}}
-
-    # Code for making worker supervisor restart permanent.
-    # worker_sup = case Supervisor.start_child(sup, worker_supervisor_spec()) do
-    #   {:ok, pid} -> pid
-    #   {:error, {:already_started, pid}} -> pid
-    # end
-
+    # {:ok, worker_sup} = Supervisor.start_child(pool_sup, worker_supervisor_spec(name))
     # workers = prepopulate(size, worker_sup, mfa)
     # {:noreply, %{state | worker_sup: worker_sup, workers: workers}}
+
+    # Code for making worker supervisor restart permanent.
+    worker_sup = case Supervisor.start_child(pool_sup, worker_supervisor_spec(name)) do
+      {:ok, pid} -> pid
+      {:error, {:already_started, pid}} -> pid
+    end
+
+    workers = prepopulate(size, worker_sup, mfa)
+    {:noreply, %{state | worker_sup: worker_sup, workers: workers}}
 
   end
 
@@ -136,11 +140,11 @@ defmodule Pooly.PoolServer do
     # Restart is temporary because we want to have some custom
     # recovery.
     %{
-      id: name <> "WorkerSupervisor",
-      start: {Pooly.WorkerSupervisor, :start_link, []},
+      id: :"#{name}WorkerSupervisor",
+      start: {Pooly.WorkerSupervisor, :start_link, [:"#{name}WorkerSupervisor"]},
       type: :supervisor,
-      # restart: :permanent
-      restart: :temporary
+      restart: :permanent
+      # restart: :temporary
     }
   end
 
