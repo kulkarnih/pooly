@@ -3,21 +3,21 @@ defmodule Pooly.PoolServer do
   use GenServer
 
   defmodule State do
-    defstruct sup: nil, size: nil, mfa: nil, worker_sup: nil, workers: nil, monitors: nil
+    defstruct pool_sup: nil, worker_sup: nil, monitors: nil, size: nil, mfa: nil,  workers: nil, name: nil
   end
 
-  def start_link(sup, pool_config) do
-    GenServer.start_link(__MODULE__, [sup, pool_config], name: __MODULE__)
+  def start_link(pool_sup, pool_config) do
+    GenServer.start_link(__MODULE__, [pool_sup, pool_config], name: name(pool_config[:name]))
   end
 
-  def init([sup, pool_config]) when is_pid(sup) do
+  def init([pool_sup, pool_config]) when is_pid(pool_sup) do
     # We need to perform operations when Pooly.Server or Worker crashes.
     # In case the worker crashes only cleanup is required.
     # In case the server crashes workers need to be killed as a dangling worker will be orphaned without reference.
     # Link the server to worker processes, and trap exits only in the server.
     Process.flag(:trap_exit, true)
     monitors = :ets.new(:monitors, [:private])
-    init(pool_config, %State{sup: sup, monitors: monitors})
+    init(pool_config, %State{pool_sup: pool_sup, monitors: monitors})
   end
 
   def init([{:mfa, mfa} | rest], state) do
@@ -37,57 +37,28 @@ defmodule Pooly.PoolServer do
     {:ok, state}
   end
 
-  defp worker_supervisor_spec() do
-    # Restart is temporary because we want to have some custom
-    # recovery.
-    %{
-      id: Pooly.WorkerSupervisor,
-      start: {Pooly.WorkerSupervisor, :start_link, []},
-      type: :supervisor,
-      # restart: :permanent
-      restart: :temporary
-    }
+  def checkout(pool_name) do
+    GenServer.call(name(pool_name), :checkout)
   end
 
-  defp prepopulate(size, worker_sup, mfa) do
-    prepopulate(size, worker_sup, mfa, [])
+  def checkin(pool_name, worker_pid) do
+    GenServer.cast(name(pool_name), {:checkin, worker_pid})
   end
 
-  defp prepopulate(size, _worker_sup, _mfa, workers) when size < 1 do
-    workers
+  def status(pool_name) do
+    GenServer.call(name(pool_name), :status)
   end
 
-  defp prepopulate(size, worker_sup, mfa, workers) do
-    prepopulate(size - 1, worker_sup, mfa, [new_worker(worker_sup, mfa) | workers])
-  end
-
-  defp new_worker(worker_sup, {m, f, a}) do
-    spec = %{
-      id: m,
-      start: {m, f, a}
-    }
-    {:ok, worker} = DynamicSupervisor.start_child(worker_sup, spec)
-    worker
-  end
-
-  def checkout do
-    GenServer.call(__MODULE__, :checkout)
-  end
-
-  def status do
-    GenServer.call(__MODULE__, :status)
-  end
-
-  def checkin(worker_pid) do
-    GenServer.cast(__MODULE__, {:checkin, worker_pid})
+  def terminate(_reason, _state) do
+    :ok
   end
 
   # Invoked by init.
-  def handle_info(:start_worker_supervisor, state = %{sup: sup, mfa: mfa, size: size}) do
+  def handle_info(:start_worker_supervisor, state = %{pool_sup: pool_sup, name: name, mfa: mfa, size: size}) do
     # sup -> Supervisor that supervises both GenServer(Pooly.Server) and DynamicSupervisor(Pooly.WorkerSupervisor)
     # DynamicSupervisor needs to run under `sup`.
 
-    {:ok, worker_sup} = Supervisor.start_child(sup, worker_supervisor_spec())
+    {:ok, worker_sup} = Supervisor.start_child(pool_sup, worker_supervisor_spec(name))
     workers = prepopulate(size, worker_sup, mfa)
     {:noreply, %{state | worker_sup: worker_sup, workers: workers}}
 
@@ -121,7 +92,13 @@ defmodule Pooly.PoolServer do
         true = :ets.delete(monitors, pid)
         new_state = %{state | workers: [new_worker(worker_sup, mfa) | workers]}
         {:noreply, new_state}
+      _ -> {:noreply, state}
     end
+  end
+
+  # Handle worker supervisor going down.
+  def handle_info({:EXIT, worker_sup, reason}, state = %{worker_sup: worker_sup}) do
+    {:stop, reason, state}
   end
 
   def handle_call(:checkout, {from_pid, _ref}, %{workers: workers, monitors: monitors} = state) do
@@ -149,6 +126,43 @@ defmodule Pooly.PoolServer do
         {:noreply, %{state | workers: [pid | workers]}}
       [] -> {:noreply, state}
     end
+  end
+
+  defp name(pool_name) do
+    :"#{pool_name}Server"
+  end
+
+  defp worker_supervisor_spec(name) do
+    # Restart is temporary because we want to have some custom
+    # recovery.
+    %{
+      id: name <> "WorkerSupervisor",
+      start: {Pooly.WorkerSupervisor, :start_link, []},
+      type: :supervisor,
+      # restart: :permanent
+      restart: :temporary
+    }
+  end
+
+  defp prepopulate(size, worker_sup, mfa) do
+    prepopulate(size, worker_sup, mfa, [])
+  end
+
+  defp prepopulate(size, _worker_sup, _mfa, workers) when size < 1 do
+    workers
+  end
+
+  defp prepopulate(size, worker_sup, mfa, workers) do
+    prepopulate(size - 1, worker_sup, mfa, [new_worker(worker_sup, mfa) | workers])
+  end
+
+  defp new_worker(worker_sup, {m, f, a}) do
+    spec = %{
+      id: m,
+      start: {m, f, a}
+    }
+    {:ok, worker} = DynamicSupervisor.start_child(worker_sup, spec)
+    worker
   end
 
 end
